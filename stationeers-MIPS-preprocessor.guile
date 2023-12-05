@@ -1,0 +1,176 @@
+#!/usr/bin/env -S guile -s
+coding: utf-8
+!#
+
+(define maxrows 128)
+(define maxcols 52)
+
+(use-modules (ice-9 textual-ports) (srfi srfi-1))
+
+(define inputfile (cadr (command-line)))
+(define outputfile (caddr (command-line)))
+
+
+(define (makelinelist port) 
+  (string-split (get-string-all port) #\newline)
+  )
+
+(define (splitlinelist linelist) (cond 
+				   ((null? linelist) '())
+				   (else (cons (string-split (car linelist) #\space) (splitlinelist (cdr linelist))))
+				   ))
+
+(define (combinewordlist wordlist) (cond
+				     ((null? (cdr wordlist)) (car wordlist))
+				     (else (string-append (car wordlist) " " (combinewordlist (cdr wordlist))))
+				     ))
+(define (combinewordlists wordlistlist) (cond
+					  ((null? (cdr wordlistlist)) (combinewordlist (car wordlistlist)))
+					  (else (string-append (combinewordlist (car wordlistlist)) (string #\newline) (combinewordlists (cdr wordlistlist))))
+					  ))
+
+(define (writewordlistsproc wordlistlist) (lambda (port)
+					    (put-string port (combinewordlists wordlistlist))
+					    ))
+
+(define (removeemptylines wordlistlist) (cond
+					  ((null? wordlistlist) '())
+					  ((string-null? (caar wordlistlist)) (removeemptylines (cdr wordlistlist)))
+					  (else (cons (car wordlistlist) (removeemptylines (cdr wordlistlist))))
+					  ))
+
+(define (removecommentlines wordlistlist) (cond
+					    ((null? wordlistlist) '())
+					    ((string= "#" (caar wordlistlist) 0 1 0 1) (removecommentlines (cdr wordlistlist)))
+					    (else (cons (car wordlistlist) (removecommentlines (cdr wordlistlist))))
+					    ))
+
+(define (linelength wordlist) (cond
+				((null? (cdr wordlist)) (string-length (car wordlist)))
+				(else (+ (string-length (car wordlist)) 1 (linelength (cdr wordlist))))
+				))
+
+(define (tryonline proc wordlist) ((lambda (newwordlist)
+				     (cond
+				       ((< (linelength newwordlist) maxcols) newwordlist)
+				       (else wordlist)
+				       )
+				     ) (proc wordlist)))
+
+(define (expandwordset wordlist wordset) (cond
+					   ((null? wordlist) wordset)
+					   ((member (car wordlist) wordset) (expandwordset (cdr wordlist) wordset))
+					   (else (cons (car wordlist) (expandwordset (cdr wordlist) wordset)))
+					   ))
+
+; this will ignore the first word of each line
+(define (findallusedwords wordlistlist) (cond
+					  ((null? wordlistlist) '())
+					  ((string= "#" (caar wordlistlist) 0 1 0 1) (findallusedwords (cdr wordlistlist)))
+					  ((or (string= "alias" (caar wordlistlist)) (string= "define" (caar wordlistlist)))
+					   (expandwordset (cddar wordlistlist) (findallusedwords (cdr wordlistlist)))
+					   )
+					  (else (expandwordset (cdar wordlistlist) (findallusedwords (cdr wordlistlist))))
+					  ))
+
+(define (removeunuseddefines2 wordlistlist wordset) (cond
+						     ((null? wordlistlist) `())
+						     ((and (string= "define" (caar wordlistlist)) (not (member (cadar wordlistlist) wordset)))
+						      (removeunuseddefines2 (cdr wordlistlist) wordset)
+						      )
+						     (else (cons (car wordlistlist) (removeunuseddefines2 (cdr wordlistlist) wordset)))
+						     ))
+
+(define (removeunuseddefines wordlistlist) (removeunuseddefines2 wordlistlist (findallusedwords wordlistlist)))
+
+; this is probably useless unless you expand the aliases, which you probably don't want to do as it will make it more difficult to select the correct devices
+(define (removeunusedaliases2 wordlistlist wordset) (cond
+						     ((null? wordlistlist) `())
+						     ((and (string= "alias" (caar wordlistlist)) (not (member (cadar wordlistlist) wordset)))
+						      (removeunusedaliases2 (cdr wordlistlist) wordset)
+						      )
+						     (else (cons (car wordlistlist) (removeunusedaliases2 (cdr wordlistlist) wordset)))
+						     ))
+
+(define (removeunusedaliases wordlistlist) (removeunusedaliases2 wordlistlist (findallusedwords wordlistlist)))
+
+; this will remove any line beginning with a word ending in a colon, unless that word also starts with a hashtag (is a comment), provided that the word (without its last character) is not in the wordset
+(define (removeunusedlabels2 wordlistlist wordset) (cond
+						     ((null? wordlistlist) '())
+						     ((and 
+							(string= ":" (string-take-right (caar wordlistlist) 1))
+							(string<> "#" (caar wordlistlist) 0 1 0 1)
+							(not (member (string-drop-right (caar wordlistlist) 1) wordset))
+							)
+						      (removeunusedlabels2 (cdr wordlistlist) wordset)
+						      )
+						     (else (cons (car wordlistlist) (removeunusedlabels2 (cdr wordlistlist) wordset)))
+						     ))
+
+(define (removeunusedlabels wordlistlist) (removeunusedlabels2 wordlistlist (findallusedwords wordlistlist)))
+
+(define (alistsubstitute wordlist alist) (cond
+					  ((null? wordlist) '())
+					  ((assoc-ref alist (car wordlist)) => (lambda (wordinlist)
+										 (cons (car wordinlist) (alistsubstitute (cdr wordlist) alist))
+										 ))
+					  (else (cons (car wordlist) (alistsubstitute (cdr wordlist) alist)))
+					  ))
+
+; note that this won't expand the first word of a line as i don't think that should happen, but i could be wrong
+(define (expanddefines2 wordlistlist alist) (cond
+					      ((null? wordlistlist) '())
+					      ((and (string= "define" (caar wordlistlist)) (display alist))
+					       (cons (car wordlistlist) (expanddefines2 (cdr wordlistlist) (cons (cdar wordlistlist) alist)))
+					       )
+					      (else (cons
+						      (tryonline 
+							(lambda (wordlist) (cons (car wordlist) (alistsubstitute (cdr wordlist) alist)))
+							(car wordlistlist)
+							)
+						      (expanddefines2 (cdr wordlistlist) alist)
+						      ))
+					      ))
+
+(define (expanddefines wordlistlist) (expanddefines2 wordlistlist '()))
+
+(define (cutdowntosize wordlistlist procs) (cond
+					     ((<= (length wordlistlist) maxrows) wordlistlist)
+					     ((null? procs) (raise-exception "Program too long"))
+					     (else (cutdowntosize ((car procs) wordlistlist) (cdr procs)))
+					     ))
+
+((lambda (wordlistlist)
+   (write wordlistlist)
+   (display #\newline)
+   (display (length wordlistlist))
+   (display #\newline)
+   ((lambda (newwordlistlist)
+      (write newwordlistlist)
+      (display #\newline)
+      (display (length newwordlistlist))
+      (display #\newline)
+      (write (findallusedwords newwordlistlist))
+      (display #\newline)
+      (call-with-output-file outputfile
+			     (writewordlistsproc newwordlistlist)
+			     )
+      ) 
+    (cutdowntosize
+      wordlistlist
+      (list
+	removeemptylines
+	removecommentlines
+	removeunuseddefines
+	removeunusedaliases
+	removeunusedlabels
+	expanddefines
+	removeunuseddefines
+	)
+      )
+    )
+   )
+ (splitlinelist
+   (call-with-input-file inputfile makelinelist)
+   )
+ )
