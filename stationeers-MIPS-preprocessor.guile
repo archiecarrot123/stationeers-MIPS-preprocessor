@@ -2,13 +2,24 @@
 coding: utf-8
 !#
 
+(use-modules (ice-9 textual-ports) (srfi srfi-1))
+
 (define maxrows 128)
 (define maxcols 52)
 
-(use-modules (ice-9 textual-ports) (srfi srfi-1))
+(define inputfile "input.ic10")
+(define outputfile "output.ic10")
 
-(define inputfile (cadr (command-line)))
-(define outputfile (caddr (command-line)))
+(define (processargs args argno) (cond
+			     ((null? args) '())
+			     ((string= "-r" (car args)) (and (set! maxrows (string->number (cadr args))) (processargs (cddr args) argno)))
+			     ((string= "-c" (car args)) (and (set! maxcols (string->number (cadr args))) (processargs (cddr args) argno)))
+			     ((equal? argno 1) (and (set! inputfile (car args)) (processargs (cdr args) 2)))
+			     ((equal? argno 2) (and (set! outputfile (car args)) (processargs (cdr args) 3)))
+			     (else (raise-exception "argument error (too many?)"))
+			     ))
+
+(processargs (cdr (command-line)) 1)
 
 
 (define (makelinelist port) 
@@ -66,7 +77,7 @@ coding: utf-8
 ; this will ignore the first word of each line
 (define (findallusedwords wordlistlist) (cond
 					  ((null? wordlistlist) '())
-					  ((string= "#" (caar wordlistlist) 0 1 0 1) (findallusedwords (cdr wordlistlist)))
+					  ((or (string= "" (caar wordlistlist)) (string= "#" (caar wordlistlist) 0 1 0 1)) (findallusedwords (cdr wordlistlist)))
 					  ((or (string= "alias" (caar wordlistlist)) (string= "define" (caar wordlistlist)))
 					   (expandwordset (cddar wordlistlist) (findallusedwords (cdr wordlistlist)))
 					   )
